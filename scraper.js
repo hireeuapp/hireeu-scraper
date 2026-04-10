@@ -27,17 +27,14 @@ export async function scrapeJustJoinIT(role = '') {
       timeout: 30000,
     });
 
-    // Debug — see what the page actually looks like
-    const pageTitle = await listPage.title();
-    const bodyPreview = await listPage.evaluate(() => document.body.innerText.slice(0, 500));
-    const cardCount = await listPage.evaluate(() =>
-      document.querySelectorAll('a[href*="/job-offer/"]').length
-    );
-    console.log('Page title:', pageTitle);
-    console.log('Body preview:', bodyPreview);
-    console.log('Job cards found:', cardCount);
-
     await listPage.waitForSelector('a[href*="/job-offer/"]', { timeout: 15000 });
+
+    // Debug: log the HTML of the first card so we can see real class names
+    const firstCardHTML = await listPage.evaluate(() => {
+      const card = document.querySelector('a[href*="/job-offer/"]');
+      return card ? card.innerHTML.slice(0, 1000) : 'no card found';
+    });
+    console.log('First card HTML:', firstCardHTML);
 
     const listings = await listPage.evaluate((max) => {
       const cards = document.querySelectorAll('a[href*="/job-offer/"]');
@@ -50,12 +47,39 @@ export async function scrapeJustJoinIT(role = '') {
         if (!url || seen.has(url)) continue;
         seen.add(url);
 
+        // Try multiple selector strategies for title
         const title =
-          card.querySelector('h2, h3, [class*="title"], [class*="Title"]')?.innerText?.trim() || '';
+          card.querySelector('h2')?.innerText?.trim() ||
+          card.querySelector('h3')?.innerText?.trim() ||
+          card.querySelector('[class*="title"]')?.innerText?.trim() ||
+          card.querySelector('[class*="Title"]')?.innerText?.trim() ||
+          card.querySelector('[class*="name"]')?.innerText?.trim() ||
+          card.querySelector('[class*="Name"]')?.innerText?.trim() ||
+          // fallback: first non-empty text node
+          [...card.querySelectorAll('div, span, p')]
+            .map(el => el.childNodes)
+            .flat()
+            .filter(n => n.nodeType === 3 && n.textContent.trim().length > 3)
+            .map(n => n.textContent.trim())[0] ||
+          '';
+
+        // Try multiple selector strategies for company
         const company =
-          card.querySelector('[class*="company"], [class*="Company"]')?.innerText?.trim() || '';
+          card.querySelector('[class*="company"]')?.innerText?.trim() ||
+          card.querySelector('[class*="Company"]')?.innerText?.trim() ||
+          card.querySelector('[class*="employer"]')?.innerText?.trim() ||
+          card.querySelector('[class*="Employer"]')?.innerText?.trim() ||
+          card.querySelector('[class*="firm"]')?.innerText?.trim() ||
+          '';
+
+        // Try multiple selector strategies for location
         const location =
-          card.querySelector('[class*="location"], [class*="city"]')?.innerText?.trim() || '';
+          card.querySelector('[class*="location"]')?.innerText?.trim() ||
+          card.querySelector('[class*="Location"]')?.innerText?.trim() ||
+          card.querySelector('[class*="city"]')?.innerText?.trim() ||
+          card.querySelector('[class*="City"]')?.innerText?.trim() ||
+          card.querySelector('[class*="place"]')?.innerText?.trim() ||
+          '';
 
         if (!title) continue;
         jobs.push({ url, title, company, location });
@@ -68,9 +92,16 @@ export async function scrapeJustJoinIT(role = '') {
 
     await listPage.close();
 
-    // Filter by role keyword before visiting detail pages
+    // Loosened filter — match any word from role against title
+    // Also skip filter entirely if role is very short (e.g. "QA")
+    const roleLower = role.toLowerCase();
+    const roleWords = roleLower.split(/\s+/).filter(w => w.length > 1);
+
     const filtered = role
-      ? listings.filter(j => j.title.toLowerCase().includes(role.toLowerCase()))
+      ? listings.filter(j => {
+          const t = j.title.toLowerCase();
+          return roleWords.some(w => t.includes(w));
+        })
       : listings;
 
     console.log('After role filter:', filtered.length);
