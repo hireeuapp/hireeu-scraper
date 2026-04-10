@@ -27,6 +27,16 @@ export async function scrapeJustJoinIT(role = '') {
       timeout: 30000,
     });
 
+    // Debug — see what the page actually looks like
+    const pageTitle = await listPage.title();
+    const bodyPreview = await listPage.evaluate(() => document.body.innerText.slice(0, 500));
+    const cardCount = await listPage.evaluate(() =>
+      document.querySelectorAll('a[href*="/job-offer/"]').length
+    );
+    console.log('Page title:', pageTitle);
+    console.log('Body preview:', bodyPreview);
+    console.log('Job cards found:', cardCount);
+
     await listPage.waitForSelector('a[href*="/job-offer/"]', { timeout: 15000 });
 
     const listings = await listPage.evaluate((max) => {
@@ -53,12 +63,17 @@ export async function scrapeJustJoinIT(role = '') {
       return jobs;
     }, MAX_JOBS);
 
+    console.log('Listings extracted:', listings.length);
+    if (listings.length > 0) console.log('First listing:', JSON.stringify(listings[0]));
+
     await listPage.close();
 
     // Filter by role keyword before visiting detail pages
     const filtered = role
       ? listings.filter(j => j.title.toLowerCase().includes(role.toLowerCase()))
       : listings;
+
+    console.log('After role filter:', filtered.length);
 
     const detailPage = await context.newPage();
 
