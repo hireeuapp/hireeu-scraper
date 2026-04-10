@@ -1,8 +1,0 @@
-[phases.setup]
-nixPkgs = ["chromium", "glib", "nss", "nspr", "atk", "cups", "libdrm", "mesa", "libxkbcommon", "at-spi2-atk", "at-spi2-core", "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes", "xorg.libXrandr", "xorg.libxcb", "pango", "cairo", "alsa-lib"]
-
-[phases.build]
-cmds = ["npm install"]
-
-[phases.start]
-cmd = "node index.js"
