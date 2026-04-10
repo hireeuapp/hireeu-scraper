@@ -29,13 +29,6 @@ export async function scrapeJustJoinIT(role = '') {
 
     await listPage.waitForSelector('a[href*="/job-offer/"]', { timeout: 15000 });
 
-    // Debug: log the HTML of the first card so we can see real class names
-    const firstCardHTML = await listPage.evaluate(() => {
-      const card = document.querySelector('a[href*="/job-offer/"]');
-      return card ? card.innerHTML.slice(0, 1000) : 'no card found';
-    });
-    console.log('First card HTML:', firstCardHTML);
-
     const listings = await listPage.evaluate((max) => {
       const cards = document.querySelectorAll('a[href*="/job-offer/"]');
       const seen = new Set();
@@ -47,39 +40,18 @@ export async function scrapeJustJoinIT(role = '') {
         if (!url || seen.has(url)) continue;
         seen.add(url);
 
-        // Try multiple selector strategies for title
-        const title =
-          card.querySelector('h2')?.innerText?.trim() ||
-          card.querySelector('h3')?.innerText?.trim() ||
-          card.querySelector('[class*="title"]')?.innerText?.trim() ||
-          card.querySelector('[class*="Title"]')?.innerText?.trim() ||
-          card.querySelector('[class*="name"]')?.innerText?.trim() ||
-          card.querySelector('[class*="Name"]')?.innerText?.trim() ||
-          // fallback: first non-empty text node
-          [...card.querySelectorAll('div, span, p')]
-            .map(el => el.childNodes)
-            .flat()
-            .filter(n => n.nodeType === 3 && n.textContent.trim().length > 3)
-            .map(n => n.textContent.trim())[0] ||
-          '';
+        // Title is in h3
+        const title = card.querySelector('h3')?.innerText?.trim() || '';
 
-        // Try multiple selector strategies for company
-        const company =
-          card.querySelector('[class*="company"]')?.innerText?.trim() ||
-          card.querySelector('[class*="Company"]')?.innerText?.trim() ||
-          card.querySelector('[class*="employer"]')?.innerText?.trim() ||
-          card.querySelector('[class*="Employer"]')?.innerText?.trim() ||
-          card.querySelector('[class*="firm"]')?.innerText?.trim() ||
-          '';
+        // Company name is in the img alt with id="offerCardCompanyLogo"
+        // but the alt is the job title — instead grab the first span after h3
+        // which contains company name based on MUI structure
+        const spans = card.querySelectorAll('span');
+        const company = spans.length > 0 ? spans[0].innerText?.trim() : '';
 
-        // Try multiple selector strategies for location
-        const location =
-          card.querySelector('[class*="location"]')?.innerText?.trim() ||
-          card.querySelector('[class*="Location"]')?.innerText?.trim() ||
-          card.querySelector('[class*="city"]')?.innerText?.trim() ||
-          card.querySelector('[class*="City"]')?.innerText?.trim() ||
-          card.querySelector('[class*="place"]')?.innerText?.trim() ||
-          '';
+        // Location: look for spans that contain city names
+        // They appear after company in the card spans
+        const location = spans.length > 1 ? spans[1].innerText?.trim() : '';
 
         if (!title) continue;
         jobs.push({ url, title, company, location });
@@ -92,16 +64,12 @@ export async function scrapeJustJoinIT(role = '') {
 
     await listPage.close();
 
-    // Loosened filter — match any word from role against title
-    // Also skip filter entirely if role is very short (e.g. "QA")
+    // Match role against title — keep filter loose, min word length 2
     const roleLower = role.toLowerCase();
     const roleWords = roleLower.split(/\s+/).filter(w => w.length > 1);
 
     const filtered = role
-      ? listings.filter(j => {
-          const t = j.title.toLowerCase();
-          return roleWords.some(w => t.includes(w));
-        })
+      ? listings.filter(j => roleWords.some(w => j.title.toLowerCase().includes(w)))
       : listings;
 
     console.log('After role filter:', filtered.length);
