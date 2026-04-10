@@ -11,7 +11,7 @@ function sleep(ms) {
 export async function scrapeJustJoinIT(role = '') {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: '/run/current-system/sw/bin/chromium',
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
 
   const context = await browser.newContext({
