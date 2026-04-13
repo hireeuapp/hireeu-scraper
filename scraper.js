@@ -77,6 +77,8 @@ async function scrapeJustJoinIT(context, role) {
 }
 
 // ── NoFluffJobs ─────────────────────────────────────────────────────────────
+// No detail page visits — their pages crash the container due to heavy JS
+// Listing cards already contain enough data (title, company, location, url)
 async function scrapeNoFluffJobs(context, role) {
   const results = [];
   const page = await context.newPage();
@@ -109,32 +111,18 @@ async function scrapeNoFluffJobs(context, role) {
 
     await page.close();
 
-    const detailPage = await context.newPage();
+    // Push directly from listing data — no detail page visits
     for (const listing of listings) {
-      try {
-        await detailPage.goto(listing.url, { waitUntil: 'networkidle', timeout: 20000 });
-        const description = await detailPage.evaluate(() => {
-          const el = document.querySelector('[class*="description"]') ||
-            document.querySelector('[class*="requirements"]') ||
-            document.querySelector('section') || document.querySelector('main');
-          return el ? el.innerText.trim().slice(0, 3000) : '';
-        });
-        results.push({
-          id: 'nfj_' + encodeURIComponent(listing.url),
-          title: listing.title,
-          company: listing.company,
-          location: listing.location,
-          description,
-          applyUrl: listing.url,
-          source: 'NoFluffJobs',
-        });
-        await sleep(DELAY_MS);
-      } catch (err) {
-        console.error(`NFJ detail failed: ${err.message}`);
-        results.push({ id: 'nfj_' + encodeURIComponent(listing.url), ...listing, applyUrl: listing.url, description: '', source: 'NoFluffJobs' });
-      }
+      results.push({
+        id: 'nfj_' + encodeURIComponent(listing.url),
+        title: listing.title,
+        company: listing.company,
+        location: listing.location,
+        description: '',
+        applyUrl: listing.url,
+        source: 'NoFluffJobs',
+      });
     }
-    await detailPage.close();
   } catch (err) {
     console.error('NoFluffJobs scrape failed:', err.message);
     try { await page.close(); } catch {}
@@ -155,10 +143,26 @@ async function scrapeEnglishJobs(context, role) {
       : 'https://englishjobs.pl/jobs/all';
 
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForSelector('a[href*="/job/"]', { timeout: 15000 });
 
+    // Log the page HTML to debug selectors
+    const bodyPreview = await page.evaluate(() => document.body.innerText.slice(0, 800));
+    console.log('EnglishJobs body preview:', bodyPreview);
+
+    const linkCount = await page.evaluate(() =>
+      document.querySelectorAll('a').length
+    );
+    console.log('EnglishJobs total links:', linkCount);
+
+    // Try broader selector — englishjobs uses /offer/ or /job/ paths
     const listings = await page.evaluate((max) => {
-      const cards = document.querySelectorAll('a[href*="/job/"]');
+      // Try multiple link patterns
+      const selectors = ['a[href*="/job/"]', 'a[href*="/offer/"]', 'a[href*="/oferta/"]'];
+      let cards = [];
+      for (const sel of selectors) {
+        const found = [...document.querySelectorAll(sel)];
+        if (found.length > 0) { cards = found; break; }
+      }
+
       const seen = new Set();
       const jobs = [];
       for (const card of cards) {
@@ -166,16 +170,22 @@ async function scrapeEnglishJobs(context, role) {
         const href = card.href;
         if (!href || seen.has(href) || href.includes('/jobs/')) continue;
         seen.add(href);
-        const title = card.querySelector('h2, h3, [class*="title"], [class*="position"]')?.innerText?.trim() ||
+
+        // Walk up to find a container with more info
+        const container = card.closest('li, article, div[class*="card"], div[class*="job"], div[class*="offer"]') || card;
+        const title =
+          container.querySelector('h2, h3, h4, [class*="title"], [class*="position"]')?.innerText?.trim() ||
           card.innerText?.trim().split('\n')[0] || '';
-        const company = card.querySelector('[class*="company"], [class*="employer"]')?.innerText?.trim() || '';
-        const location = card.querySelector('[class*="location"], [class*="city"]')?.innerText?.trim() || '';
+        const company = container.querySelector('[class*="company"], [class*="employer"]')?.innerText?.trim() || '';
+        const location = container.querySelector('[class*="location"], [class*="city"], [class*="place"]')?.innerText?.trim() || '';
+
         if (!title || title.length < 3) continue;
         jobs.push({ url: href, title, company, location });
       }
       return jobs;
     }, MAX_PER_SITE);
 
+    console.log(`EnglishJobs listings found: ${listings.length}`);
     await page.close();
 
     const detailPage = await context.newPage();
@@ -232,7 +242,6 @@ export async function scrapeAllSites(role = '') {
   let results = [];
 
   try {
-    // Run all three scrapers sequentially to avoid overloading the container
     const jjit = await scrapeJustJoinIT(context, role);
     const nfj  = await scrapeNoFluffJobs(context, role);
     const ej   = await scrapeEnglishJobs(context, role);
