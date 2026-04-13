@@ -1,251 +1,246 @@
 import { chromium } from 'playwright';
 
-const MAX_JOBS = 30;
-const DELAY_MS = 800;
+const DELAY_MS = 1500;
+const MAX_PER_SITE = 20;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ─────────────────────────────────────────────────────────────
-// JustJoinIT — intercept the internal API calls the SPA makes.
-// The old /api/offers endpoint is dead since late 2023.
-// The current site is a React/MUI SPA. Best approach: intercept
-// the XHR/fetch calls it fires to its own backend for JSON data.
-// ─────────────────────────────────────────────────────────────
-export async function scrapeJustJoinIT(role = '') {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
-
-  const context = await browser.newContext({
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
-  });
-
-  let capturedJobs = [];
-
-  // Intercept API responses before they reach the DOM
-  context.on('response', async (response) => {
-    const url = response.url();
-    if (
-      (url.includes('justjoin.it') || url.includes('jjit')) &&
-      (url.includes('/offers') || url.includes('/jobs') || url.includes('/listings') || url.includes('/search'))
-    ) {
-      try {
-        const ct = response.headers()['content-type'] || '';
-        if (!ct.includes('json')) return;
-        const data = await response.json();
-        const items = Array.isArray(data)
-          ? data
-          : data.data || data.offers || data.jobs || data.results || [];
-        if (items.length > 0) {
-          console.log(`[JJIT] Intercepted ${items.length} jobs from ${url}`);
-          capturedJobs.push(...items);
-        }
-      } catch (_) {}
-    }
-  });
-
-  const page = await context.newPage();
-  const searchUrl = role
-    ? `https://justjoin.it/job-offers?keyword=${encodeURIComponent(role)}`
-    : 'https://justjoin.it/job-offers';
-
-  try {
-    console.log(`[JJIT] Navigating to ${searchUrl}`);
-    await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 45000 });
-    await sleep(3000);
-
-    // Fallback: scrape rendered DOM if interception got nothing
-    if (capturedJobs.length === 0) {
-      console.log('[JJIT] No XHR jobs captured — falling back to DOM scrape');
-      capturedJobs = await page.evaluate(() => {
-        const jobs = [];
-        const selectors = [
-          'a[href*="/job-offer/"]',
-          'a[href*="/offers/"]',
-          '[data-index] a',
-          'li[data-id] a',
-        ];
-        let cards = [];
-        for (const sel of selectors) {
-          cards = [...document.querySelectorAll(sel)];
-          if (cards.length > 0) break;
-        }
-        const seen = new Set();
-        for (const card of cards) {
-          if (jobs.length >= 40) break;
-          const url = card.href;
-          if (!url || seen.has(url)) continue;
-          seen.add(url);
-
-          const title =
-            card.querySelector('h2,h3,h4,[class*="title"],[class*="Title"]')
-              ?.innerText?.trim() || '';
-          const logo = card.querySelector('img[alt]');
-          const spans = card.querySelectorAll('span,p');
-          const company =
-            (logo?.alt && logo.alt !== title ? logo.alt : null) ||
-            spans[0]?.innerText?.trim() || '';
-          const location = spans[1]?.innerText?.trim() || '';
-
-          if (!title) continue;
-          jobs.push({ slug: url.split('/').pop(), title, companyName: company, city: location, link: url });
-        }
-        return jobs;
-      });
-      console.log(`[JJIT] DOM scraped ${capturedJobs.length} cards`);
-    }
-  } catch (err) {
-    console.error('[JJIT] Page load error:', err.message);
-  } finally {
-    await page.close();
-    await context.close();
-    await browser.close();
-  }
-
-  if (capturedJobs.length === 0) {
-    console.warn('[JJIT] Zero results');
-    return [];
-  }
-
-  const roleLower = role.toLowerCase();
-  const roleWords = roleLower.split(/\s+/).filter(w => w.length > 1);
-
-  const normalised = capturedJobs.map(j => ({
-    id: j.slug || j.id || j.link || String(Math.random()),
-    title: j.title || j.jobTitle || '',
-    company: j.companyName || j.company || '',
-    location: j.city || j.location || 'Poland',
-    description: [
-      j.title,
-      j.companyName,
-      ...(j.requiredSkills || j.skills || []),
-      j.workplaceType || '',
-      j.experienceLevel || '',
-    ].filter(Boolean).join(' — '),
-    applyUrl: j.link || (j.slug ? `https://justjoin.it/job-offer/${j.slug}` : ''),
-    source: 'Poland',
-  }));
-
-  const filtered = role
-    ? normalised.filter(j => roleWords.some(w => j.title.toLowerCase().includes(w)))
-    : normalised;
-
-  console.log(`[JJIT] Returning ${filtered.length} jobs`);
-  return filtered.slice(0, MAX_JOBS);
-}
-
-// ─────────────────────────────────────────────────────────────
-// NoFluffJobs — secondary source, Poland-focused, partially SSR
-// ─────────────────────────────────────────────────────────────
-export async function scrapeNoFluffJobs(role = '') {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
-
-  const context = await browser.newContext({
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  });
-
+// ── JustJoinIT ──────────────────────────────────────────────────────────────
+async function scrapeJustJoinIT(context, role) {
   const results = [];
+  const listPage = await context.newPage();
 
   try {
-    const page = await context.newPage();
-    const searchUrl = role
-      ? `https://nofluffjobs.com/jobs?criteria=city%3Dpoland+keyword%3D${encodeURIComponent(role)}`
-      : 'https://nofluffjobs.com/jobs?criteria=city%3Dpoland';
+    const url = role
+      ? `https://justjoin.it/all-locations?keyword=${encodeURIComponent(role)}`
+      : 'https://justjoin.it/all-locations';
 
-    console.log(`[NFJ] Navigating to ${searchUrl}`);
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 40000 });
-    await sleep(2500);
+    await listPage.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    await listPage.waitForSelector('a[href*="/job-offer/"]', { timeout: 15000 });
 
-    const jobs = await page.evaluate(() => {
-      const cards = document.querySelectorAll(
-        'a[href*="/job/"], [class*="posting-list-item"] a, nfj-postings-list a'
-      );
+    const listings = await listPage.evaluate((max) => {
+      const cards = document.querySelectorAll('a[href*="/job-offer/"]');
       const seen = new Set();
-      const out = [];
-
+      const jobs = [];
       for (const card of cards) {
-        if (out.length >= 25) break;
-        const url = card.href
-          ? (card.href.startsWith('http') ? card.href : 'https://nofluffjobs.com' + card.href)
-          : null;
-        if (!url || seen.has(url) || !url.includes('/job/')) continue;
+        if (jobs.length >= max) break;
+        const url = card.href;
+        if (!url || seen.has(url)) continue;
         seen.add(url);
-
-        const title =
-          card.querySelector('[class*="title"],[class*="Title"],h3,h2,strong')
-            ?.innerText?.trim() || card.innerText?.split('\n')[0]?.trim() || '';
-        const lines = (card.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
-        const company = lines[1] || '';
-        const location = lines[2] || 'Poland';
-
+        const title = card.querySelector('h3')?.innerText?.trim() || '';
+        const spans = card.querySelectorAll('span');
+        const company = [...spans].map(s => s.innerText?.trim())
+          .find(t => t && !t.includes('Salary') && !t.match(/^[\d,\s]+$/) && t.length > 1) || '';
+        const location = spans[1]?.innerText?.trim() || '';
         if (!title) continue;
-        out.push({ url, title, company, location });
+        jobs.push({ url, title, company, location });
       }
-      return out;
-    });
+      return jobs;
+    }, MAX_PER_SITE);
 
-    console.log(`[NFJ] Scraped ${jobs.length} cards`);
+    await listPage.close();
 
-    for (const job of jobs) {
-      results.push({
-        id: job.url,
-        title: job.title,
-        company: job.company,
-        location: job.location,
-        description: `${job.title} at ${job.company} — ${job.location}`,
-        applyUrl: job.url,
-        source: 'Poland',
-      });
-      await sleep(DELAY_MS);
+    const detailPage = await context.newPage();
+    for (const listing of listings) {
+      try {
+        await detailPage.goto(listing.url, { waitUntil: 'networkidle', timeout: 20000 });
+        const description = await detailPage.evaluate(() => {
+          const el = document.querySelector('[class*="description"]') ||
+            document.querySelector('article') || document.querySelector('main');
+          return el ? el.innerText.trim().slice(0, 3000) : '';
+        });
+        results.push({
+          id: 'jjit_' + encodeURIComponent(listing.url),
+          title: listing.title,
+          company: listing.company,
+          location: listing.location,
+          description,
+          applyUrl: listing.url,
+          source: 'JustJoinIT',
+        });
+        await sleep(DELAY_MS);
+      } catch (err) {
+        console.error(`JJIT detail failed: ${err.message}`);
+        results.push({ id: 'jjit_' + encodeURIComponent(listing.url), ...listing, applyUrl: listing.url, description: '', source: 'JustJoinIT' });
+      }
     }
+    await detailPage.close();
+  } catch (err) {
+    console.error('JustJoinIT scrape failed:', err.message);
+    try { await listPage.close(); } catch {}
+  }
+
+  console.log(`JustJoinIT: ${results.length} jobs`);
+  return results;
+}
+
+// ── NoFluffJobs ─────────────────────────────────────────────────────────────
+async function scrapeNoFluffJobs(context, role) {
+  const results = [];
+  const page = await context.newPage();
+
+  try {
+    const url = role
+      ? `https://nofluffjobs.com/pl?criteria=keyword%3D${encodeURIComponent(role)}`
+      : 'https://nofluffjobs.com/pl';
+
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForSelector('a[href*="/pl/job/"]', { timeout: 15000 });
+
+    const listings = await page.evaluate((max) => {
+      const cards = document.querySelectorAll('a[href*="/pl/job/"]');
+      const seen = new Set();
+      const jobs = [];
+      for (const card of cards) {
+        if (jobs.length >= max) break;
+        const href = card.href;
+        if (!href || seen.has(href)) continue;
+        seen.add(href);
+        const title = card.querySelector('h3, h2, [class*="title"]')?.innerText?.trim() || '';
+        const company = card.querySelector('[class*="company"], [class*="employer"]')?.innerText?.trim() || '';
+        const location = card.querySelector('[class*="location"], [class*="city"]')?.innerText?.trim() || '';
+        if (!title) continue;
+        jobs.push({ url: href, title, company, location });
+      }
+      return jobs;
+    }, MAX_PER_SITE);
 
     await page.close();
+
+    const detailPage = await context.newPage();
+    for (const listing of listings) {
+      try {
+        await detailPage.goto(listing.url, { waitUntil: 'networkidle', timeout: 20000 });
+        const description = await detailPage.evaluate(() => {
+          const el = document.querySelector('[class*="description"]') ||
+            document.querySelector('[class*="requirements"]') ||
+            document.querySelector('section') || document.querySelector('main');
+          return el ? el.innerText.trim().slice(0, 3000) : '';
+        });
+        results.push({
+          id: 'nfj_' + encodeURIComponent(listing.url),
+          title: listing.title,
+          company: listing.company,
+          location: listing.location,
+          description,
+          applyUrl: listing.url,
+          source: 'NoFluffJobs',
+        });
+        await sleep(DELAY_MS);
+      } catch (err) {
+        console.error(`NFJ detail failed: ${err.message}`);
+        results.push({ id: 'nfj_' + encodeURIComponent(listing.url), ...listing, applyUrl: listing.url, description: '', source: 'NoFluffJobs' });
+      }
+    }
+    await detailPage.close();
   } catch (err) {
-    console.error('[NFJ] Error:', err.message);
+    console.error('NoFluffJobs scrape failed:', err.message);
+    try { await page.close(); } catch {}
+  }
+
+  console.log(`NoFluffJobs: ${results.length} jobs`);
+  return results;
+}
+
+// ── EnglishJobs.pl ──────────────────────────────────────────────────────────
+async function scrapeEnglishJobs(context, role) {
+  const results = [];
+  const page = await context.newPage();
+
+  try {
+    const url = role
+      ? `https://englishjobs.pl/jobs/all?q=${encodeURIComponent(role)}`
+      : 'https://englishjobs.pl/jobs/all';
+
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForSelector('a[href*="/job/"]', { timeout: 15000 });
+
+    const listings = await page.evaluate((max) => {
+      const cards = document.querySelectorAll('a[href*="/job/"]');
+      const seen = new Set();
+      const jobs = [];
+      for (const card of cards) {
+        if (jobs.length >= max) break;
+        const href = card.href;
+        if (!href || seen.has(href) || href.includes('/jobs/')) continue;
+        seen.add(href);
+        const title = card.querySelector('h2, h3, [class*="title"], [class*="position"]')?.innerText?.trim() ||
+          card.innerText?.trim().split('\n')[0] || '';
+        const company = card.querySelector('[class*="company"], [class*="employer"]')?.innerText?.trim() || '';
+        const location = card.querySelector('[class*="location"], [class*="city"]')?.innerText?.trim() || '';
+        if (!title || title.length < 3) continue;
+        jobs.push({ url: href, title, company, location });
+      }
+      return jobs;
+    }, MAX_PER_SITE);
+
+    await page.close();
+
+    const detailPage = await context.newPage();
+    for (const listing of listings) {
+      try {
+        await detailPage.goto(listing.url, { waitUntil: 'networkidle', timeout: 20000 });
+        const { description, company, location } = await detailPage.evaluate(() => {
+          const desc = document.querySelector('[class*="description"]') ||
+            document.querySelector('article') || document.querySelector('main');
+          const company = document.querySelector('[class*="company"]')?.innerText?.trim() || '';
+          const location = document.querySelector('[class*="location"]')?.innerText?.trim() || '';
+          return {
+            description: desc ? desc.innerText.trim().slice(0, 3000) : '',
+            company,
+            location,
+          };
+        });
+        results.push({
+          id: 'ej_' + encodeURIComponent(listing.url),
+          title: listing.title,
+          company: company || listing.company,
+          location: location || listing.location,
+          description,
+          applyUrl: listing.url,
+          source: 'EnglishJobs.pl',
+        });
+        await sleep(DELAY_MS);
+      } catch (err) {
+        console.error(`EJ detail failed: ${err.message}`);
+        results.push({ id: 'ej_' + encodeURIComponent(listing.url), ...listing, applyUrl: listing.url, description: '', source: 'EnglishJobs.pl' });
+      }
+    }
+    await detailPage.close();
+  } catch (err) {
+    console.error('EnglishJobs scrape failed:', err.message);
+    try { await page.close(); } catch {}
+  }
+
+  console.log(`EnglishJobs.pl: ${results.length} jobs`);
+  return results;
+}
+
+// ── Main export ─────────────────────────────────────────────────────────────
+export async function scrapeAllSites(role = '') {
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  });
+
+  let results = [];
+
+  try {
+    // Run all three scrapers sequentially to avoid overloading the container
+    const jjit = await scrapeJustJoinIT(context, role);
+    const nfj  = await scrapeNoFluffJobs(context, role);
+    const ej   = await scrapeEnglishJobs(context, role);
+    results = [...jjit, ...nfj, ...ej];
   } finally {
-    await context.close();
     await browser.close();
   }
 
-  return results.slice(0, MAX_JOBS);
-}
-
-// ─────────────────────────────────────────────────────────────
-// Combined scrape — runs both sources, deduplicates by title+company
-// ─────────────────────────────────────────────────────────────
-export async function scrapeAll(role = '') {
-  console.log(`[scrapeAll] Starting for role: "${role}"`);
-
-  const [jjitResult, nfjResult] = await Promise.allSettled([
-    scrapeJustJoinIT(role),
-    scrapeNoFluffJobs(role),
-  ]);
-
-  const allJobs = [
-    ...(jjitResult.status === 'fulfilled' ? jjitResult.value : []),
-    ...(nfjResult.status === 'fulfilled' ? nfjResult.value : []),
-  ];
-
-  if (jjitResult.status === 'rejected') console.error('[JJIT] Failed:', jjitResult.reason);
-  if (nfjResult.status === 'rejected') console.error('[NFJ] Failed:', nfjResult.reason);
-
-  const seen = new Set();
-  const deduped = allJobs.filter(j => {
-    const key = `${j.title.toLowerCase().trim()}|${j.company.toLowerCase().trim()}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  console.log(`[scrapeAll] Unique jobs: ${deduped.length}`);
-  return deduped;
+  console.log(`Total scraped: ${results.length} jobs`);
+  return results;
 }
