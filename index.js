@@ -123,7 +123,3 @@ app.get('/cache-status', (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => console.log(`Scraper server running on port ${PORT}`));
-
-setInterval(() => {
-  fetch(`http://localhost:${PORT}/health`).catch(() => {});
-}, 4 * 60 * 1000); // ping self every 4 mins
